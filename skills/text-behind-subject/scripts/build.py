@@ -18,21 +18,40 @@ def raster(text, font, color):
     ImageDraw.Draw(im).text((2-box[0],2-box[1]),text,font=font,fill=color)
     return im
 
-def split(im, axis, directory, index):
-    """Stretch a 2px interior band, retaining the original glyph end shapes."""
+def find_cut(im, axis):
     alpha = im.getchannel('A')
     n = im.width if axis == 'x' else im.height
     scores=[]
     for v in range(max(2,int(n*.25)), min(n-3,int(n*.7))):
         band = alpha.crop((v,0,v+1,im.height) if axis=='x' else (0,v,im.width,v+1))
         scores.append((sum(band.getdata()),v))
-    cut=max(scores)[1]
+    return max(scores)[1]
+
+def split(im, axis, directory, index, cut=None, extra=0):
+    """Extract one opaque ink profile; never amplify alpha differences between pixels."""
+    cut=find_cut(im,axis) if cut is None else cut
     boxes = [(0,0,cut,im.height),(cut,0,cut+2,im.height),(cut+2,0,im.width,im.height)] if axis=='x' else [(0,0,im.width,cut),(0,cut,im.width,cut+2),(0,cut+2,im.width,im.height)]
     parts=[]
     for j,b in enumerate(boxes):
         p=im.crop(b); name=f'text-{index}-{j}.png'; p.save(directory/name)
         parts.append({'file':name,'w':p.width,'h':p.height,'x':b[0],'y':b[1]})
+    solid_band(im,axis,cut,2+extra,directory/parts[1]['file'])
+    parts[1]['w' if axis=='x' else 'h']=2+extra
     return cut,parts
+
+def solid_band(im, axis, cut, length, output):
+    """Repeat a single binary-alpha profile into final-size geometry, without scaling."""
+    box=(cut,0,cut+1,im.height) if axis=='x' else (0,cut,im.width,cut+1)
+    profile=im.crop(box)
+    profile.putalpha(profile.getchannel('A').point(lambda a:255 if a>=128 else 0))
+    size=(length,im.height) if axis=='x' else (im.width,length)
+    profile.resize(size,Image.Resampling.NEAREST).save(output)
+
+def glyph_spans(text, font, width):
+    """Preserve the original line spacing when giving each character its own motion."""
+    box=font.getbbox(text); scale=width/(box[2]-box[0]+4)
+    bounds=[0]+[round((2-box[0]+font.getlength(text[:i]))*scale) for i in range(1,len(text))]+[width]
+    return [(text[i],max(0,bounds[i]),min(width,bounds[i+1])) for i in range(len(text)) if bounds[i+1]>bounds[i]]
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
@@ -102,16 +121,27 @@ def main():
     markup=[]; tweens=[]; y=round(a.y*h); layout=[]
     span=min(duration,3.5)/3.5
     for i,im in enumerate(images):
-        axis='y' if i==len(images)-1 else 'x'; cut,parts=split(im,axis,assets,i)
+        axis='y' if i==len(images)-1 else 'x'; cut=find_cut(im,axis)
         extra=round((a.stretch_y*h if axis=='y' else a.stretch_x*w))
-        if axis=='y': extra=min(extra,max(0,h*.94-y-im.height))
+        if axis=='y': extra=round(min(extra,max(0,h*.94-y-im.height)))
         markup.append(f'<div id="row-{i}" style="position:absolute;left:{a.x*w}px;top:{y}px;width:{im.width+(extra if axis=="x" else 0)}px;height:{im.height+(extra if axis=="y" else 0)}px">')
-        for j,part in enumerate(parts):
-            markup.append(f'<img id="piece-{i}-{j}" alt="" src="assets/{part["file"]}" style="position:absolute;left:{part["x"]}px;top:{part["y"]}px;width:{part["w"]}px;height:{part["h"]}px;transform-origin:0 0">')
-        markup.append('</div>')
         reveal=(.12+i*.12)*span; stretch=(.75+i*.14)*span
-        tweens += [f'tl.fromTo("#row-{i}",{{opacity:0,y:18}},{{opacity:1,y:0,duration:{.23*span},ease:"power3.out"}},{reveal});',f'tl.to("#piece-{i}-1",{{{"scaleX" if axis=="x" else "scaleY"}:{(2+extra)/2},duration:{.72*span},ease:"power3.inOut"}},{stretch});',f'tl.to("#piece-{i}-2",{{{axis}:{extra},duration:{.72*span},ease:"power3.inOut"}},{stretch});']
-        layout.append({'text':texts[i],'axis':axis,'cut':cut,'extra':extra,'y':y,'width':im.width,'height':im.height})
+        hidden=100*extra/(2+extra)
+        initial_clip=f'inset(0 {hidden}% 0 0)' if axis=='x' else f'inset(0 0 {hidden}% 0)'
+        tweens.append(f'tl.fromTo("#row-{i}",{{opacity:0,y:18}},{{opacity:1,y:0,duration:{.23*span},ease:"power3.out"}},{reveal});')
+        segments=glyph_spans(texts[i],font,im.width) if axis=='y' else [(texts[i],0,im.width)]
+        stagger=min(.20*span,max(0,duration-stretch-.72*span-.3*span)/max(1,len(segments)-1))
+        motions=[]
+        for gi,(label,left,right) in enumerate(segments):
+            prefix=f'{i}-{gi}'
+            _,parts=split(im.crop((left,0,right,im.height)),axis,assets,prefix,cut=cut,extra=extra)
+            for j,part in enumerate(parts):
+                markup.append(f'<img id="piece-{prefix}-{j}" alt="" src="assets/{part["file"]}" style="position:absolute;left:{left+part["x"]}px;top:{part["y"]}px;width:{part["w"]}px;height:{part["h"]}px;transform-origin:0 0">')
+            start=stretch+gi*stagger
+            tweens += [f'tl.fromTo("#piece-{prefix}-1",{{clipPath:"{initial_clip}"}},{{clipPath:"inset(0 0 0 0)",duration:{.72*span},ease:"power3.inOut"}},{start});',f'tl.to("#piece-{prefix}-2",{{{axis}:{extra},duration:{.72*span},ease:"power3.inOut"}},{start});']
+            motions.append({'text':label,'left':left,'right':right,'start':start})
+        markup.append('</div>')
+        layout.append({'text':texts[i],'axis':axis,'cut':cut,'extra':extra,'y':y,'width':im.width,'height':im.height,'glyphs':motions})
         y+=im.height+round(h*.009)
     for n in range(frames):
         page=n//perpage; cell=n%perpage
