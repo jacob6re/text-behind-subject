@@ -47,6 +47,23 @@ def solid_band(im, axis, cut, length, output):
     size=(length,im.height) if axis=='x' else (im.width,length)
     profile.resize(size,Image.Resampling.NEAREST).save(output)
 
+def vector_band(im, axis, cut, length, element_id, left, top):
+    """Grow opaque SVG rectangles directly; no percentage clip-path interpolation."""
+    profile=im.crop((cut,0,cut+1,im.height) if axis=='x' else (0,cut,im.width,cut+1))
+    pixels=list(profile.getdata());runs=[];start=None
+    for k,pixel in enumerate(pixels+[(0,0,0,0)]):
+        if pixel[3]>=128 and start is None: start=k
+        if pixel[3]<128 and start is not None:
+            runs.append((start,k-start));start=None
+    width,height=(length,im.height) if axis=='x' else (im.width,length)
+    color=next(('#%02X%02X%02X'%p[:3] for p in pixels if p[3]>=128),'#FFFFFF')
+    markup=[f'<svg id="{element_id}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}" style="position:absolute;left:{left}px;top:{top}px;width:{width}px;height:{height}px;overflow:hidden" shape-rendering="crispEdges" aria-hidden="true">']
+    for start,size in runs:
+        x,y,w,h=(0,start,2,size) if axis=='x' else (start,0,size,2)
+        markup.append(f'<rect x="{x}" y="{y}" width="{w}" height="{h}" fill="{color}"/>')
+    markup.append('</svg>')
+    return ''.join(markup),len(runs)
+
 def glyph_spans(text, font, width):
     """Preserve the original line spacing when giving each character its own motion."""
     box=font.getbbox(text); scale=width/(box[2]-box[0]+4)
@@ -126,8 +143,6 @@ def main():
         if axis=='y': extra=round(min(extra,max(0,h*.94-y-im.height)))
         markup.append(f'<div id="row-{i}" style="position:absolute;left:{a.x*w}px;top:{y}px;width:{im.width+(extra if axis=="x" else 0)}px;height:{im.height+(extra if axis=="y" else 0)}px">')
         reveal=(.12+i*.12)*span; stretch=(.75+i*.14)*span
-        hidden=100*extra/(2+extra)
-        initial_clip=f'inset(0 {hidden}% 0 0)' if axis=='x' else f'inset(0 0 {hidden}% 0)'
         tweens.append(f'tl.fromTo("#row-{i}",{{opacity:0,y:18}},{{opacity:1,y:0,duration:{.23*span},ease:"power3.out"}},{reveal});')
         segments=glyph_spans(texts[i],font,im.width) if axis=='y' else [(texts[i],0,im.width)]
         stagger=min(.20*span,max(0,duration-stretch-.72*span-.3*span)/max(1,len(segments)-1))
@@ -136,9 +151,15 @@ def main():
             prefix=f'{i}-{gi}'
             _,parts=split(im.crop((left,0,right,im.height)),axis,assets,prefix,cut=cut,extra=extra)
             for j,part in enumerate(parts):
-                markup.append(f'<img id="piece-{prefix}-{j}" alt="" src="assets/{part["file"]}" style="position:absolute;left:{left+part["x"]}px;top:{part["y"]}px;width:{part["w"]}px;height:{part["h"]}px;transform-origin:0 0">')
+                if j==1:
+                    svg,run_count=vector_band(im.crop((left,0,right,im.height)),axis,cut,2+extra,f'piece-{prefix}-1',left+part['x'],part['y'])
+                    markup.append(svg)
+                else:
+                    markup.append(f'<img id="piece-{prefix}-{j}" alt="" src="assets/{part["file"]}" style="position:absolute;left:{left+part["x"]}px;top:{part["y"]}px;width:{part["w"]}px;height:{part["h"]}px;transform-origin:0 0">')
             start=stretch+gi*stagger
-            tweens += [f'tl.fromTo("#piece-{prefix}-1",{{clipPath:"{initial_clip}"}},{{clipPath:"inset(0 0 0 0)",duration:{.72*span},ease:"power3.inOut"}},{start});',f'tl.to("#piece-{prefix}-2",{{{axis}:{extra},duration:{.72*span},ease:"power3.inOut"}},{start});']
+            if run_count:
+                tweens.append(f'tl.to("#piece-{prefix}-1 rect",{{attr:{{{"width" if axis=="x" else "height"}:{2+extra}}},duration:{.72*span},ease:"power3.inOut"}},{start});')
+            tweens.append(f'tl.to("#piece-{prefix}-2",{{{axis}:{extra},duration:{.72*span},ease:"power3.inOut"}},{start});')
             motions.append({'text':label,'left':left,'right':right,'start':start})
         markup.append('</div>')
         layout.append({'text':texts[i],'axis':axis,'cut':cut,'extra':extra,'y':y,'width':im.width,'height':im.height,'glyphs':motions})
