@@ -1,0 +1,4 @@
+interface:
+  display_name: "Text Behind Subject"
+  short_description: "人物背后红色文字出现，局部笔画横向延展与纵向拉伸，逐帧遮挡人物"
+  default_prompt: "使用 $text-behind-subject，让红色文字从人物头顶背后出现，再拉伸笔画，始终保持人物在最前方。"
